@@ -1,11 +1,9 @@
 from datetime import datetime
 
 from sqlalchemy import String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
-class Base(DeclarativeBase):
-    pass
+from app.core.models import Base
 
 
 class Plant(Base):
@@ -13,7 +11,10 @@ class Plant(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
-    name: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
 
     species: Mapped[str | None] = mapped_column(
         String(150),
@@ -42,4 +43,5 @@ class Plant(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
+        nullable=False,
     )

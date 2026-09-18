@@ -1,10 +1,11 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models.plant import Base
+from app.core.models import Base
 
 
 DATABASE_URL = "sqlite:///./green_riot.db"
+
 
 engine = create_engine(
     DATABASE_URL,
