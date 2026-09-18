@@ -67,6 +67,7 @@ media/
 storage/
 *.sqlite
 *.sqlite3
+*.db
 
 # =========================
 # Logs
