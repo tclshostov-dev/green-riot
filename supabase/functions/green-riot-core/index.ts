@@ -330,6 +330,159 @@ export default {
           });
         }
 
+        // СОХРАНЕНИЕ СОБЫТИЯ ПОЛИВА
+        if (/^\/water(?:@\w+)?(?:\s|$)/i.test(text)) {
+          const match = text.match(/^\/water(?:@\w+)?\s+(\d+)\s*$/i);
+
+          if (!match) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text:
+                  "🌱 Чтобы отметить полив, напиши:\n\n" +
+                  "/water 1\n\n" +
+                  "Число — это ID растения из карточки.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Запрошен ID растения для полива",
+              user_id: user.id,
+            });
+          }
+
+          const plantId = Number(match[1]);
+
+          if (!Number.isSafeInteger(plantId) || plantId <= 0) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Номер растения должен быть положительным целым числом.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Некорректный ID растения",
+              user_id: user.id,
+            });
+          }
+
+          // Разрешаем записывать события только для собственного активного растения
+          const {
+            data: plant,
+            error: plantLookupError,
+          } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name")
+            .eq("id", plantId)
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (plantLookupError) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Не удалось проверить растение. Попробуй ещё раз позже.",
+              },
+            );
+
+            return Response.json({
+              status: "error",
+              message: "Ошибка проверки растения",
+              details: plantLookupError.message,
+            }, { status: 500 });
+          }
+
+          if (!plant) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text:
+                  "🌱 Не нашёл активное растение с таким ID среди твоих растений.\n\n" +
+                  "Проверь ID в карточке растения.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Растение не найдено для этого пользователя",
+              user_id: user.id,
+            });
+          }
+
+          const eventAt = new Date().toISOString();
+
+          const {
+            data: event,
+            error: eventError,
+          } = await ctx.supabaseAdmin
+            .from("plant_events")
+            .insert({
+              user_id: user.id,
+              plant_id: plant.id,
+              event_type: "watering",
+              description: "Полив отмечен пользователем через Telegram.",
+              amount_value: null,
+              amount_unit: null,
+              event_at: eventAt,
+              created_at: eventAt,
+            })
+            .select("id, event_type, event_at, plant_id")
+            .single();
+
+          if (eventError) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text:
+                  "🌱 Не удалось сохранить полив.\n\n" +
+                  "Ошибка: " + eventError.message,
+              },
+            );
+
+            return Response.json({
+              status: "error",
+              message: "Ошибка записи события полива",
+              details: eventError.message,
+            }, { status: 500 });
+          }
+
+          await telegramApi(
+            botToken,
+            "sendMessage",
+            {
+              chat_id: chatId,
+              text:
+                "💧 Полив записан в историю!\n\n" +
+                "Растение: " + plant.name + "\n" +
+                "ID растения: " + plant.id + "\n" +
+                "ID события: " + event.id + "\n\n" +
+                "Теперь полив сохранён в облачной памяти «Зелёного бунта».",
+            },
+          );
+
+          return Response.json({
+            status: "ok",
+            message: "Событие полива записано",
+            user_id: user.id,
+            plant_id: plant.id,
+            event_id: event.id,
+          });
+        }
+
         // ПРОЧИЕ СООБЩЕНИЯ
         const replyText =
           "🌱 Я на связи.\n\n" +
