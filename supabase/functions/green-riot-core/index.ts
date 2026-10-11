@@ -1,10 +1,33 @@
 import { withSupabase } from "npm:@supabase/server@^1";
 
+function mainMenuKeyboard() {
+  return {
+    keyboard: [
+      [
+        { text: "🌿 Мои растения" },
+        { text: "➕ Добавить растение" },
+      ],
+      [
+        { text: "💧 Отметить полив" },
+        { text: "📖 История ухода" },
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "Выбери действие",
+  };
+}
+
 async function telegramApi(
   botToken: string,
   method: string,
   payload: Record<string, unknown>,
 ) {
+  const requestPayload =
+    method === "sendMessage" && !("reply_markup" in payload)
+      ? { ...payload, reply_markup: mainMenuKeyboard() }
+      : payload;
+
   const response = await fetch(
     `https://api.telegram.org/bot${botToken}/${method}`,
     {
@@ -12,7 +35,7 @@ async function telegramApi(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(requestPayload),
     },
   );
 
@@ -27,6 +50,7 @@ async function telegramApi(
 function parseAddPlantCommand(text: string) {
   const withoutCommand = text
     .replace(/^\/addplant(?:@\w+)?/i, "")
+    .replace(/^растение\s*:/i, "")
     .trim();
 
   if (!withoutCommand) {
@@ -107,7 +131,7 @@ export default {
               {
                 url: webhookUrl,
                 secret_token: webhookSecret,
-                allowed_updates: ["message"],
+                allowed_updates: ["message", "callback_query"],
                 drop_pending_updates: false,
               },
             );
@@ -166,13 +190,15 @@ export default {
         }
 
         const update = await req.json();
-        const message = update?.message;
+        const callbackQuery = update?.callback_query;
+        const message = update?.message ?? callbackQuery?.message;
+        const sender = callbackQuery?.from ?? message?.from;
 
-        if (!message) {
+        if (!message || !sender) {
           return new Response("ok", { status: 200 });
         }
 
-        const telegramUserId = message?.from?.id;
+        const telegramUserId = sender?.id;
         const chatId = message?.chat?.id;
 
         if (!telegramUserId || !chatId) {
@@ -183,8 +209,8 @@ export default {
           channel: "telegram",
           external_user_id: String(telegramUserId),
           chat_id: String(chatId),
-          first_name: message?.from?.first_name ?? null,
-          username: message?.from?.username ?? null,
+          first_name: sender?.first_name ?? null,
+          username: sender?.username ?? null,
         };
 
         // СОХРАНЯЕМ / ОБНОВЛЯЕМ ПОЛЬЗОВАТЕЛЯ
@@ -213,6 +239,400 @@ export default {
         }
 
         const text = message?.text ?? "";
+        const callbackData = callbackQuery?.data ?? "";
+
+        // ОБРАБОТКА НАЖАТИЙ НА РАСТЕНИЯ
+        if (callbackQuery && callbackData) {
+          await telegramApi(
+            botToken,
+            "answerCallbackQuery",
+            { callback_query_id: callbackQuery.id },
+          );
+
+          const callbackMatch =
+            callbackData.match(/^(plant|history|water):(\d+)$/);
+
+          if (!callbackMatch) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Эта кнопка устарела. Открой меню и выбери действие ещё раз.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Неизвестное действие кнопки",
+            });
+          }
+
+          const action = callbackMatch[1];
+          const plantId = Number(callbackMatch[2]);
+
+          const {
+            data: selectedPlant,
+            error: selectedPlantError,
+          } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name, species, location, notes, created_at")
+            .eq("id", plantId)
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (selectedPlantError) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Не удалось загрузить растение. Попробуй ещё раз.",
+              },
+            );
+
+            return Response.json({
+              status: "error",
+              message: "Ошибка чтения растения",
+              details: selectedPlantError.message,
+            }, { status: 500 });
+          }
+
+          if (!selectedPlant) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Не нашёл это растение среди твоих активных растений.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Растение недоступно этому пользователю",
+            });
+          }
+
+          if (action === "water") {
+            const eventAt = new Date().toISOString();
+
+            const {
+              data: event,
+              error: eventError,
+            } = await ctx.supabaseAdmin
+              .from("plant_events")
+              .insert({
+                user_id: user.id,
+                plant_id: selectedPlant.id,
+                event_type: "watering",
+                description: "Полив отмечен пользователем через меню Telegram.",
+                amount_value: null,
+                amount_unit: null,
+                event_at: eventAt,
+                created_at: eventAt,
+              })
+              .select("id, event_at")
+              .single();
+
+            if (eventError) {
+              await telegramApi(
+                botToken,
+                "sendMessage",
+                {
+                  chat_id: chatId,
+                  text: "Не удалось сохранить полив. Попробуй ещё раз позже.",
+                },
+              );
+
+              return Response.json({
+                status: "error",
+                message: "Ошибка записи полива из меню",
+                details: eventError.message,
+              }, { status: 500 });
+            }
+
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text:
+                  "💧 Полив записан в историю!\n\n" +
+                  `Растение: ${selectedPlant.name}\n` +
+                  `ID события: ${event.id}\n` +
+                  "Запись сохранена в облачной памяти.",
+              },
+            );
+
+            return Response.json({
+              status: "ok",
+              message: "Полив записан из меню",
+              user_id: user.id,
+              plant_id: selectedPlant.id,
+              event_id: event.id,
+            });
+          }
+
+          const {
+            data: plantEvents,
+            error: plantEventsError,
+          } = await ctx.supabaseAdmin
+            .from("plant_events")
+            .select("id, event_type, description, event_at")
+            .eq("user_id", user.id)
+            .eq("plant_id", selectedPlant.id)
+            .order("event_at", { ascending: false })
+            .limit(5);
+
+          if (plantEventsError) {
+            await telegramApi(
+              botToken,
+              "sendMessage",
+              {
+                chat_id: chatId,
+                text: "Карточка открылась, но историю ухода загрузить не удалось.",
+              },
+            );
+
+            return Response.json({
+              status: "error",
+              message: "Ошибка чтения истории ухода",
+              details: plantEventsError.message,
+            }, { status: 500 });
+          }
+
+          const eventLabels: Record<string, string> = {
+            watering: "Полив",
+            fertilizing: "Подкормка",
+            repotting: "Пересадка",
+            treatment: "Обработка",
+            pruning: "Обрезка",
+            moved: "Перемещение",
+          };
+
+          const eventsText = (plantEvents ?? []).length
+            ? (plantEvents ?? []).map((event, index) => {
+                const label = eventLabels[event.event_type] ?? event.event_type;
+                const date = new Date(event.event_at).toLocaleString(
+                  "ru-RU",
+                  { timeZone: "Europe/Moscow" },
+                );
+                const description = event.description
+                  ? "\n   " + event.description
+                  : "";
+                return `${index + 1}. ${label} — ${date}${description}`;
+              }).join("\n")
+            : "Пока нет записанных событий ухода.";
+
+          const heading =
+            action === "history"
+              ? "📖 История ухода"
+              : "🌿 Карточка растения";
+
+          const details =
+            `${heading}\n\nНазвание: ${selectedPlant.name}\n` +
+            (selectedPlant.species ? `Разновидность: ${selectedPlant.species}\n` : "") +
+            (selectedPlant.location ? `Место: ${selectedPlant.location}\n` : "") +
+            (selectedPlant.notes ? `Заметка: ${selectedPlant.notes}\n` : "") +
+            `ID растения: ${selectedPlant.id}\n\nПоследние события ухода:\n` +
+            eventsText;
+
+          await telegramApi(
+            botToken,
+            "sendMessage",
+            { chat_id: chatId, text: details },
+          );
+
+          return Response.json({
+            status: "ok",
+            message: "Карточка и история отправлены из меню",
+            user_id: user.id,
+            plant_id: selectedPlant.id,
+            events_count: (plantEvents ?? []).length,
+          });
+        }
+
+        // КОМАНДЫ РУССКОГО МЕНЮ
+        const menuAction = text.trim();
+
+        if (["🌿 Мои растения", "Мои растения"].includes(menuAction)) {
+          const {
+            data: plants,
+            error: plantsError,
+          } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name, species, location")
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .order("created_at", { ascending: false })
+            .limit(50);
+
+          if (plantsError) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "Не удалось загрузить список растений. Попробуй позже.",
+            });
+            return Response.json({
+              status: "error",
+              message: "Ошибка списка растений",
+              details: plantsError.message,
+            }, { status: 500 });
+          }
+
+          if (!(plants ?? []).length) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "🌱 Пока у тебя нет растений. Нажми «➕ Добавить растение», чтобы создать первое.",
+            });
+          } else {
+            const keyboard = {
+              inline_keyboard: (plants ?? []).map((plant) => [{
+                text: `🌿 ${plant.name} · ID ${plant.id}`,
+                callback_data: `plant:${plant.id}`,
+              }]),
+            };
+
+            const listText =
+              "🌿 Твои растения:\n\n" +
+              (plants ?? []).map((plant, index) =>
+                `${index + 1}. ${plant.name}` +
+                (plant.species ? ` — ${plant.species}` : "") +
+                (plant.location ? ` · ${plant.location}` : "") +
+                ` · ID ${plant.id}`
+              ).join("\n") +
+              "\n\nНажми на растение, чтобы открыть карточку и историю.";
+
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: listText,
+              reply_markup: keyboard,
+            });
+          }
+
+          return Response.json({
+            status: "ok",
+            message: "Список растений отправлен",
+            user_id: user.id,
+          });
+        }
+
+        if (["📖 История ухода", "История ухода"].includes(menuAction)) {
+          const {
+            data: plants,
+            error: plantsError,
+          } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name")
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .order("created_at", { ascending: false })
+            .limit(50);
+
+          if (plantsError) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "Не удалось загрузить растения для просмотра истории.",
+            });
+            return Response.json({
+              status: "error",
+              message: "Ошибка списка растений для истории",
+              details: plantsError.message,
+            }, { status: 500 });
+          }
+
+          if (!(plants ?? []).length) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "🌱 Сначала добавь растение через «➕ Добавить растение».",
+            });
+          } else {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "📖 Выбери растение, историю которого хочешь посмотреть:",
+              reply_markup: {
+                inline_keyboard: (plants ?? []).map((plant) => [{
+                  text: `📖 ${plant.name} · ID ${plant.id}`,
+                  callback_data: `history:${plant.id}`,
+                }]),
+              },
+            });
+          }
+
+          return Response.json({
+            status: "ok",
+            message: "Выбор растения для истории отправлен",
+            user_id: user.id,
+          });
+        }
+
+        if (["💧 Отметить полив", "Отметить полив"].includes(menuAction)) {
+          const {
+            data: plants,
+            error: plantsError,
+          } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name")
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .order("created_at", { ascending: false })
+            .limit(50);
+
+          if (plantsError) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "Не удалось загрузить растения для отметки полива.",
+            });
+            return Response.json({
+              status: "error",
+              message: "Ошибка списка растений для полива",
+              details: plantsError.message,
+            }, { status: 500 });
+          }
+
+          if (!(plants ?? []).length) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "🌱 Сначала добавь растение через «➕ Добавить растение».",
+            });
+          } else {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "💧 Выбери растение, которое ты полил:",
+              reply_markup: {
+                inline_keyboard: (plants ?? []).map((plant) => [{
+                  text: `💧 ${plant.name} · ID ${plant.id}`,
+                  callback_data: `water:${plant.id}`,
+                }]),
+              },
+            });
+          }
+
+          return Response.json({
+            status: "ok",
+            message: "Выбор растения для полива отправлен",
+            user_id: user.id,
+          });
+        }
+
+        if (["➕ Добавить растение", "Добавить растение"].includes(menuAction)) {
+          await telegramApi(botToken, "sendMessage", {
+            chat_id: chatId,
+            text:
+              "➕ Добавим растение. Отправь одним сообщением:\n\n" +
+              "Растение: Фикус | Ficus elastica | Гостиная | Мой первый фикус\n\n" +
+              "Порядок: название | разновидность | место | заметка.\n" +
+              "Последние поля можно оставить пустыми.\n\n" +
+              "Например: Растение: Монстера | Monstera deliciosa | Кабинет | У окна",
+          });
+
+          return Response.json({
+            status: "ok",
+            message: "Формат добавления растения показан",
+            user_id: user.id,
+          });
+        }
 
         // КОМАНДА /start
         if (text.startsWith("/start")) {
@@ -237,7 +657,7 @@ export default {
         }
 
         // ДОБАВЛЕНИЕ РАСТЕНИЯ
-        if (/^\/addplant(?:@\w+)?/i.test(text)) {
+        if (/^\/addplant(?:@\w+)?/i.test(text) || /^растение\s*:/i.test(text)) {
           const plantData = parseAddPlantCommand(text);
 
           if (!plantData?.name) {
@@ -248,10 +668,9 @@ export default {
                 chat_id: chatId,
                 text:
                   "🌱 Добавляем растение.\n\n" +
-                  "Формат:\n" +
-                  "/addplant Имя | Разновидность | Расположение | Примечание\n\n" +
-                  "Например:\n" +
-                  "/addplant Фикус | Ficus elastica | Гостиная | Мой первый фикус",
+                  "Отправь одним сообщением:\n" +
+                  "Растение: Фикус | Ficus elastica | Гостиная | Мой первый фикус\n\n" +
+                  "Можно также использовать старую команду /addplant.",
               },
             );
 
@@ -652,9 +1071,9 @@ export default {
 
         // ПРОЧИЕ СООБЩЕНИЯ
         const replyText =
-          "🌱 Я на связи.\n\n" +
-          "Чтобы добавить растение, напиши:\n\n" +
-          "/addplant Фикус | Ficus elastica | Гостиная | Мой первый фикус";
+          "🌱 Я на связи! Выбери действие в русском меню под полем ввода.\n\n" +
+          "Чтобы добавить растение, нажми «➕ Добавить растение». " +
+          "Чтобы открыть сад — «🌿 Мои растения».";
 
         await telegramApi(
           botToken,
