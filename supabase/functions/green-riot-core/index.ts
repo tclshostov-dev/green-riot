@@ -444,6 +444,80 @@ export default {
               throw new Error("Фото загружено, но запись наблюдения не сохранилась: " + observationError.message);
             }
 
+            let analysisMessage = "";
+            const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+
+            if (geminiApiKey) {
+              try {
+                const mimeType =
+                  safeExtension === "png" ? "image/png" : "image/jpeg";
+
+                const analysis = await analyzePlantPhoto(
+                  geminiApiKey,
+                  imageBytes,
+                  mimeType,
+                  String(photoPlant.name),
+                  userNote,
+                );
+
+                const recommendationsText =
+                  analysis.recommendations.length > 0
+                    ? analysis.recommendations
+                        .map((item, index) => `${index + 1}. ${item}`)
+                        .join("\n")
+                    : "Пока нет рекомендаций.";
+
+                const confidenceText =
+                  analysis.confidence === null
+                    ? "не определена"
+                    : `${Math.round(analysis.confidence * 100)}%`;
+
+                const aiText =
+                  `Вероятная причина: ${analysis.possibleIssue}\n\n` +
+                  `Что видно на фото: ${analysis.observations}\n\n` +
+                  `Уверенность модели: ${confidenceText}`;
+
+                const { error: analysisSaveError } =
+                  await ctx.supabaseAdmin
+                    .from("plant_observations")
+                    .update({
+                      ai_analysis: aiText,
+                      possible_issue: analysis.possibleIssue,
+                      recommendations: recommendationsText,
+                    })
+                    .eq("id", observation.id)
+                    .eq("user_id", user.id);
+
+                if (analysisSaveError) {
+                  throw new Error("Не удалось сохранить результат анализа");
+                }
+
+                const questionsText =
+                  analysis.followUpQuestions.length > 0
+                    ? "\n\nУточни, пожалуйста:\n" +
+                      analysis.followUpQuestions
+                        .map((item) => "• " + item)
+                        .join("\n")
+                    : "";
+
+                analysisMessage =
+                  "\n\n🔎 Предварительный ИИ-анализ\n\n" +
+                  aiText +
+                  "\n\n🌱 Что можно сделать:\n" +
+                  recommendationsText +
+                  questionsText +
+                  "\n\nВажно: это предварительная оценка по фото, а не точный диагноз.";
+              } catch (_analysisError) {
+                analysisMessage =
+                  "\n\n⚠️ Фото сохранено, но ИИ-анализ сейчас не удался. " +
+                  "Снимок не потерян. Позже проверим причину.";
+              }
+            } else {
+              analysisMessage =
+                "\n\n⚠️ Не найден ключ Gemini. Фото сохранено, " +
+                "но ИИ-анализ не запущен.";
+            }
+
             await telegramApi(botToken, "sendMessage", {
               chat_id: chatId,
               text:
@@ -451,7 +525,8 @@ export default {
                 "Растение: " + photoPlant.name + "\n" +
                 "ID наблюдения: " + observation.id + "\n" +
                 (userNote ? "Твоя заметка: " + userNote + "\n" : "") +
-                "\n📦 Фото находится в закрытом хранилище. Следующим этапом подключим ИИ-анализ снимка.",
+                "\n📦 Фото находится в закрытом хранилище." +
+                analysisMessage,
             });
 
             return Response.json({
