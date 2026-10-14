@@ -47,6 +47,109 @@ async function telegramApi(
   };
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(i, i + chunkSize),
+    );
+  }
+
+  return btoa(binary);
+}
+
+async function analyzePlantPhoto(
+  apiKey: string,
+  imageBytes: Uint8Array,
+  mimeType: string,
+  plantName: string,
+  userNote: string | null,
+) {
+  const prompt = `
+Ты помощник по уходу за комнатными растениями.
+Проанализируй фотографию осторожно и отвечай на русском языке.
+Не утверждай, что диагноз точный.
+Не выдумывай признаки, которых не видно.
+Если фото недостаточно чёткое, сообщи об этом.
+Не назначай опасные химикаты и неизвестные дозировки.
+
+Название растения: ${plantName}
+Заметка пользователя: ${userNote || "не указана"}
+
+Верни только JSON с полями:
+possible_issue — вероятная причина или "Не удалось определить";
+observations — что видно на фотографии;
+confidence — число от 0 до 1;
+recommendations — массив из 2–5 безопасных советов;
+follow_up_questions — массив уточняющих вопросов.
+`;
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: prompt },
+            {
+              inline_data: {
+                mime_type: mimeType,
+                data: bytesToBase64(imageBytes),
+              },
+            },
+          ],
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          maxOutputTokens: 900,
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Gemini API вернул HTTP ${response.status}`);
+  }
+
+  const result = await response.json();
+
+  const responseText =
+    result?.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: string }) => part.text ?? "")
+      .join("")
+      .trim();
+
+  if (!responseText) {
+    throw new Error("Gemini не вернул результат анализа");
+  }
+
+  const parsed = JSON.parse(responseText);
+
+  return {
+    possibleIssue: String(
+      parsed.possible_issue || "Не удалось определить",
+    ),
+    observations: String(parsed.observations || ""),
+    confidence: Number.isFinite(Number(parsed.confidence))
+      ? Math.max(0, Math.min(1, Number(parsed.confidence)))
+      : null,
+    recommendations: Array.isArray(parsed.recommendations)
+      ? parsed.recommendations.map(String).slice(0, 5)
+      : [],
+    followUpQuestions: Array.isArray(parsed.follow_up_questions)
+      ? parsed.follow_up_questions.map(String).slice(0, 3)
+      : [],
+  };
+}
+
 function parseAddPlantCommand(text: string) {
   const withoutCommand = text
     .replace(/^\/addplant(?:@\w+)?/i, "")
