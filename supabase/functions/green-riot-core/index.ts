@@ -241,6 +241,138 @@ export default {
         const text = message?.text ?? "";
         const callbackData = callbackQuery?.data ?? "";
 
+        // СОХРАНЕНИЕ ФОТОГРАФИИ РАСТЕНИЯ
+        // Формат подписи: Фото растения 2 | На листьях появились пятна
+        if (Array.isArray(message?.photo) && message.photo.length > 0) {
+          const caption = String(message?.caption ?? "").trim();
+          const photoMatch = caption.match(/^(?:фото\s+растения|растение)\s*#?\s*(\d+)(?:\s*[|—-]\s*(.*))?$/i);
+
+          if (!photoMatch) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "📸 Фото получил, но пока не знаю, к какому растению его привязать.\n\n" +
+                "Отправь фото с подписью в формате:\n" +
+                "Фото растения 2 | На листьях появились пятна\n\n" +
+                "Число — ID твоего растения из карточки. Заметку после вертикальной черты можно изменить или убрать.",
+            });
+            return Response.json({ status: "ok", message: "Для фото требуется ID растения" });
+          }
+
+          const plantId = Number(photoMatch[1]);
+          const userNote = (photoMatch[2] ?? "").trim() || null;
+
+          const { data: photoPlant, error: photoPlantError } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name")
+            .eq("id", plantId)
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (photoPlantError) {
+            return Response.json({
+              status: "error",
+              message: "Не удалось проверить растение для фотографии",
+              details: photoPlantError.message,
+            }, { status: 500 });
+          }
+
+          if (!photoPlant) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "🌱 Не нашёл твоё активное растение с ID " + plantId + ". Проверь ID и отправь фото ещё раз.",
+            });
+            return Response.json({ status: "ok", message: "Растение для фото не найдено" });
+          }
+
+          try {
+            // Берём фотографию максимального доступного размера из Telegram.
+            const largestPhoto = message.photo[message.photo.length - 1];
+            const fileInfoResponse = await fetch(
+              `https://api.telegram.org/bot${botToken}/getFile?file_id=${encodeURIComponent(largestPhoto.file_id)}`,
+            );
+            const fileInfo = await fileInfoResponse.json();
+
+            if (!fileInfoResponse.ok || fileInfo.ok !== true || !fileInfo.result?.file_path) {
+              throw new Error("Telegram не смог подготовить файл фотографии.");
+            }
+
+            const telegramFilePath = String(fileInfo.result.file_path);
+            const downloadResponse = await fetch(
+              `https://api.telegram.org/file/bot${botToken}/${telegramFilePath}`,
+            );
+
+            if (!downloadResponse.ok) {
+              throw new Error("Не удалось скачать фотографию из Telegram.");
+            }
+
+            const imageBytes = new Uint8Array(await downloadResponse.arrayBuffer());
+            const extension = telegramFilePath.split(".").pop()?.toLowerCase() || "jpg";
+            const safeExtension = /^[a-z0-9]{1,5}$/.test(extension) ? extension : "jpg";
+            const storagePath =
+              `${user.id}/${photoPlant.id}/${Date.now()}_${String(largestPhoto.file_unique_id ?? largestPhoto.file_id).replace(/[^a-zA-Z0-9_-]/g, "")}.${safeExtension}`;
+
+            const { error: uploadError } = await ctx.supabaseAdmin.storage
+              .from("plant-photos")
+              .upload(storagePath, imageBytes, {
+                contentType: safeExtension === "png" ? "image/png" : "image/jpeg",
+                upsert: false,
+              });
+
+            if (uploadError) {
+              throw new Error("Не удалось сохранить фото в хранилище: " + uploadError.message);
+            }
+
+            const { data: observation, error: observationError } = await ctx.supabaseAdmin
+              .from("plant_observations")
+              .insert({
+                user_id: user.id,
+                plant_id: photoPlant.id,
+                photo_path: storagePath,
+                user_note: userNote,
+              })
+              .select("id, created_at")
+              .single();
+
+            if (observationError) {
+              // Убираем загруженный файл, если запись в таблицу не удалась.
+              await ctx.supabaseAdmin.storage.from("plant-photos").remove([storagePath]);
+              throw new Error("Фото загружено, но запись наблюдения не сохранилась: " + observationError.message);
+            }
+
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "🌿 Фото сохранено!\n\n" +
+                "Растение: " + photoPlant.name + "\n" +
+                "ID наблюдения: " + observation.id + "\n" +
+                (userNote ? "Твоя заметка: " + userNote + "\n" : "") +
+                "\n📦 Фото находится в закрытом хранилище. Следующим этапом подключим ИИ-анализ снимка.",
+            });
+
+            return Response.json({
+              status: "ok",
+              message: "Фото растения сохранено",
+              user_id: user.id,
+              plant_id: photoPlant.id,
+              observation_id: observation.id,
+            });
+          } catch (photoError) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "⚠️ Не удалось сохранить фото. Попробуй ещё раз.\n\n" +
+                "Если ошибка повторится, сообщи мне — проверим настройки хранилища.",
+            });
+            return Response.json({
+              status: "error",
+              message: "Ошибка сохранения фото растения",
+              details: photoError instanceof Error ? photoError.message : String(photoError),
+            }, { status: 500 });
+          }
+        }
+
         // ОБРАБОТКА НАЖАТИЙ НА РАСТЕНИЯ
         if (callbackQuery && callbackData) {
           await telegramApi(
