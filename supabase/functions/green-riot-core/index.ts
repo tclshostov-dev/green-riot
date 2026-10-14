@@ -489,7 +489,7 @@ export default {
                     .eq("user_id", user.id);
 
                 if (analysisSaveError) {
-                  throw new Error("Не удалось сохранить результат анализа");
+                  throw new Error("Ошибка записи анализа в базу: " + analysisSaveError.message);
                 }
 
                 const questionsText =
@@ -508,9 +508,14 @@ export default {
                   questionsText +
                   "\n\nВажно: это предварительная оценка по фото, а не точный диагноз.";
               } catch (_analysisError) {
+                const diagnosticMessage =
+                  _analysisError instanceof Error
+                    ? _analysisError.message
+                    : String(_analysisError);
+                console.error("GREEN_RIOT_GEMINI_ANALYSIS_FAILED:", diagnosticMessage);
                 analysisMessage =
                   "\n\n⚠️ Фото сохранено, но ИИ-анализ сейчас не удался. " +
-                  "Снимок не потерян. Позже проверим причину.";
+                  "Снимок не потерян. Причина: " + diagnosticMessage;
               }
             } else {
               analysisMessage =
