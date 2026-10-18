@@ -69,6 +69,7 @@ async function analyzePlantPhoto(
   mimeType: string,
   plantName: string,
   userNote: string | null,
+  historyContext: string,
 ) {
   const prompt = `
 Ты помощник по уходу за комнатными растениями.
@@ -80,6 +81,11 @@ async function analyzePlantPhoto(
 
 Название растения: ${plantName}
 Заметка пользователя: ${userNote || "не указана"}
+
+История этого растения и справочные сведения (если доступны):
+${historyContext || "История и справочные сведения не найдены; не делай вид, что они есть."}
+
+Учитывай историю как контекст, но не считай старые предположения доказанным диагнозом. Если данных недостаточно, задай уточняющие вопросы. Не выдумывай данные каталога.
 
 Верни только JSON с полями:
 possible_issue — вероятная причина или "Не удалось определить";
@@ -399,7 +405,7 @@ export default {
 
           const { data: photoPlant, error: photoPlantError } = await ctx.supabaseAdmin
             .from("plants")
-            .select("id, name")
+            .select("id, name, species")
             .eq("id", plantId)
             .eq("user_id", user.id)
             .eq("is_active", true)
@@ -484,12 +490,53 @@ export default {
                 const mimeType =
                   safeExtension === "png" ? "image/png" : "image/jpeg";
 
+                // Загружаем только историю текущего пользователя и выбранного растения.
+                const [{ data: recentEvents }, { data: recentObservations }] = await Promise.all([
+                  ctx.supabaseAdmin
+                    .from("plant_events")
+                    .select("event_type, description, event_at")
+                    .eq("user_id", user.id)
+                    .eq("plant_id", photoPlant.id)
+                    .order("event_at", { ascending: false })
+                    .limit(5),
+                  ctx.supabaseAdmin
+                    .from("plant_observations")
+                    .select("user_note, ai_analysis, possible_issue, recommendations, created_at")
+                    .eq("user_id", user.id)
+                    .eq("plant_id", photoPlant.id)
+                    .order("created_at", { ascending: false })
+                    .limit(3),
+                ]);
+
+                let catalogContext = "";
+                if (photoPlant.species) {
+                  const { data: catalogPlant } = await ctx.supabaseAdmin
+                    .from("plant_catalog")
+                    .select("russian_name, scientific_name, family, description, care_guide")
+                    .eq("scientific_name", String(photoPlant.species).trim())
+                    .maybeSingle();
+                  if (catalogPlant) {
+                    catalogContext = JSON.stringify(catalogPlant);
+                  }
+                }
+
+                const historyContext = [
+                  catalogContext ? "Справочник видов: " + catalogContext : "",
+                  (recentEvents ?? []).length
+                    ? "Последние события ухода: " + JSON.stringify(recentEvents)
+                    : "",
+                  (recentObservations ?? []).length
+                    ? "Предыдущие фото-наблюдения: " + JSON.stringify(recentObservations)
+                    : "",
+                ].filter(Boolean).join("\\n");
+
                 const analysis = await analyzePlantPhoto(
                   geminiApiKey,
                   imageBytes,
                   mimeType,
                   String(photoPlant.name),
                   userNote,
+                  historyContext,
                 );
 
                 const recommendationsText =
