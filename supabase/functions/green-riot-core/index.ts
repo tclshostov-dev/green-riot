@@ -87,7 +87,7 @@ follow_up_questions — массив уточняющих вопросов.
 `;
 
   const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
     {
       method: "POST",
       headers: {
@@ -116,7 +116,17 @@ follow_up_questions — массив уточняющих вопросов.
   );
 
   if (!response.ok) {
-    throw new Error(`Gemini API вернул HTTP ${response.status}`);
+    let providerMessage = "";
+    try {
+      const errorBody = await response.json();
+      providerMessage = String(errorBody?.error?.message ?? "");
+    } catch {
+      providerMessage = "";
+    }
+    throw new Error(
+      `Gemini API вернул HTTP ${response.status}` +
+        (providerMessage ? `: ${providerMessage}` : ""),
+    );
   }
 
   const result = await response.json();
