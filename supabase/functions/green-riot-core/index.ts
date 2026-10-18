@@ -11,6 +11,9 @@ function mainMenuKeyboard() {
         { text: "💧 Отметить полив" },
         { text: "📖 История ухода" },
       ],
+      [
+        { text: "📝 Записать наблюдение" },
+      ],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -754,6 +757,7 @@ export default {
             treatment: "Обработка",
             pruning: "Обрезка",
             moved: "Перемещение",
+            observation: "Наблюдение",
           };
 
           const eventsText = (plantEvents ?? []).length
@@ -960,6 +964,21 @@ export default {
           });
         }
 
+        if (["📝 Записать наблюдение", "Записать наблюдение"].includes(menuAction)) {
+          await telegramApi(botToken, "sendMessage", {
+            chat_id: chatId,
+            text:
+              "📝 Запишем наблюдение за растением. Отправь одним сообщением в формате:\n\n" +
+              "Наблюдение 3 | Сухие коричневые кончики, полив примерно раз в неделю, внутренний горшок со сливом.\n\n" +
+              "Замени число на ID своего растения, а после вертикальной черты опиши, что заметил. Запись попадёт в историю растения.",
+          });
+          return Response.json({
+            status: "ok",
+            message: "Формат наблюдения показан",
+            user_id: user.id,
+          });
+        }
+
         if (["➕ Добавить растение", "Добавить растение"].includes(menuAction)) {
           await telegramApi(botToken, "sendMessage", {
             chat_id: chatId,
@@ -997,6 +1016,87 @@ export default {
             status: "ok",
             message: "Команда /start обработана",
             user_id: user.id,
+          });
+        }
+
+        // СОХРАНЕНИЕ ТЕКСТОВОГО НАБЛЮДЕНИЯ
+        const observationMatch = text.trim().match(/^наблюдение\s*#?\s*(\d+)\s*[|—-]\s*(.+)$/i);
+        if (observationMatch) {
+          const plantId = Number(observationMatch[1]);
+          const description = observationMatch[2].trim();
+          if (!description) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "Добавь описание после вертикальной черты.",
+            });
+            return Response.json({ status: "ok", message: "Пустое наблюдение" });
+          }
+
+          const { data: plant, error: plantError } = await ctx.supabaseAdmin
+            .from("plants")
+            .select("id, name")
+            .eq("id", plantId)
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .maybeSingle();
+
+          if (plantError || !plant) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: plantError
+                ? "Не удалось проверить растение. Попробуй ещё раз."
+                : "Не нашёл твоё активное растение с ID " + plantId + ". Проверь номер в карточке.",
+            });
+            return Response.json({
+              status: plantError ? "error" : "ok",
+              message: plantError ? "Ошибка проверки растения для наблюдения" : "Растение для наблюдения не найдено",
+              details: plantError?.message,
+            }, plantError ? { status: 500 } : { status: 200 });
+          }
+
+          const eventAt = new Date().toISOString();
+          const { data: event, error: eventError } = await ctx.supabaseAdmin
+            .from("plant_events")
+            .insert({
+              user_id: user.id,
+              plant_id: plant.id,
+              event_type: "observation",
+              description,
+              amount_value: null,
+              amount_unit: null,
+              event_at: eventAt,
+              created_at: eventAt,
+            })
+            .select("id, event_at")
+            .single();
+
+          if (eventError) {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text: "Не удалось сохранить наблюдение. Попробуй позже.",
+            });
+            return Response.json({
+              status: "error",
+              message: "Ошибка записи наблюдения",
+              details: eventError.message,
+            }, { status: 500 });
+          }
+
+          await telegramApi(botToken, "sendMessage", {
+            chat_id: chatId,
+            text:
+              "📝 Наблюдение сохранено в истории!\n\n" +
+              "Растение: " + plant.name + "\n" +
+              "ID растения: " + plant.id + "\n" +
+              "Описание: " + description + "\n" +
+              "ID события: " + event.id,
+          });
+          return Response.json({
+            status: "ok",
+            message: "Наблюдение сохранено",
+            user_id: user.id,
+            plant_id: plant.id,
+            event_id: event.id,
           });
         }
 
