@@ -1319,6 +1319,7 @@ export default {
             treatment: "Обработка",
             pruning: "Обрезка",
             moved: "Перемещение",
+            observation: "Наблюдение",
           };
 
           const historyText = (events ?? []).length
