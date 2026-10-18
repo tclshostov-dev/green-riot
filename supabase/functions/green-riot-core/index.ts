@@ -109,7 +109,7 @@ follow_up_questions — массив уточняющих вопросов.
         generationConfig: {
           responseMimeType: "application/json",
           temperature: 0.2,
-          maxOutputTokens: 900,
+          maxOutputTokens: 1600,
         },
       }),
     },
@@ -131,17 +131,36 @@ follow_up_questions — массив уточняющих вопросов.
 
   const result = await response.json();
 
-  const responseText =
-    result?.candidates?.[0]?.content?.parts
-      ?.map((part: { text?: string }) => part.text ?? "")
-      .join("")
-      .trim();
+  const candidate = result?.candidates?.[0];
+  const responseText = candidate?.content?.parts
+    ?.map((part: { text?: string }) => part.text ?? "")
+    .join("")
+    .trim();
 
   if (!responseText) {
-    throw new Error("Gemini не вернул результат анализа");
+    const finishReason = String(candidate?.finishReason ?? "не указан");
+    throw new Error(
+      "Gemini не вернул текст анализа (finishReason: " + finishReason + ")",
+    );
   }
 
-  const parsed = JSON.parse(responseText);
+  // Убираем Markdown-ограждения, если модель неожиданно их добавила.
+  const cleanedText = responseText
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(cleanedText);
+  } catch {
+    const finishReason = String(candidate?.finishReason ?? "не указан");
+    throw new Error(
+      "Gemini вернул некорректный или неполный JSON (finishReason: " +
+        finishReason +
+        "). Повтори анализ; фотография сохранена.",
+    );
+  }
 
   return {
     possibleIssue: String(
