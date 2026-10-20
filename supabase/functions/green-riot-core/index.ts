@@ -644,7 +644,7 @@ export default {
           );
 
           const callbackMatch =
-            callbackData.match(/^(plant|history|water):(\d+)$/);
+            callbackData.match(/^(plant|history|water|photo|note):(\d+)$/);
 
           if (!callbackMatch) {
             await telegramApi(
@@ -706,6 +706,36 @@ export default {
             return Response.json({
               status: "ok",
               message: "Растение недоступно этому пользователю",
+            });
+          }
+
+          if (action === "photo") {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "📸 Отправь новую фотографию этого растения с подписью:\\n\\n" +
+                `Фото растения ${selectedPlant.id} | Что изменилось или беспокоит` +
+                "\\n\\nФото сохранится в истории, а ИИ попробует оценить состояние с учётом предыдущих наблюдений.",
+            });
+            return Response.json({
+              status: "ok",
+              message: "Показана инструкция для анализа фото",
+              plant_id: selectedPlant.id,
+            });
+          }
+
+          if (action === "note") {
+            await telegramApi(botToken, "sendMessage", {
+              chat_id: chatId,
+              text:
+                "📝 Чтобы записать наблюдение для " + selectedPlant.name + ", отправь сообщение в формате:\\n\\n" +
+                `Наблюдение ${selectedPlant.id} | Текст наблюдения` +
+                "\\n\\nНапример: Наблюдение " + selectedPlant.id + " | Появились новые сухие кончики.",
+            });
+            return Response.json({
+              status: "ok",
+              message: "Показана инструкция для записи наблюдения",
+              plant_id: selectedPlant.id,
             });
           }
 
@@ -834,10 +864,27 @@ export default {
             `ID растения: ${selectedPlant.id}\n\nПоследние события ухода:\n` +
             eventsText;
 
+          const plantActionsKeyboard = {
+            inline_keyboard: [
+              [
+                { text: "📸 Анализ фото", callback_data: `photo:${selectedPlant.id}` },
+                { text: "📖 История", callback_data: `history:${selectedPlant.id}` },
+              ],
+              [
+                { text: "💧 Отметить полив", callback_data: `water:${selectedPlant.id}` },
+                { text: "📝 Записать наблюдение", callback_data: `note:${selectedPlant.id}` },
+              ],
+            ],
+          };
+
           await telegramApi(
             botToken,
             "sendMessage",
-            { chat_id: chatId, text: details },
+            {
+              chat_id: chatId,
+              text: details,
+              reply_markup: plantActionsKeyboard,
+            },
           );
 
           return Response.json({
