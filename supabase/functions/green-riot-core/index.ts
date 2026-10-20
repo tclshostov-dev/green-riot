@@ -528,7 +528,7 @@ export default {
                   (recentObservations ?? []).length
                     ? "Предыдущие фото-наблюдения: " + JSON.stringify(recentObservations)
                     : "",
-                ].filter(Boolean).join("\\n");
+                ].filter(Boolean).join("\n");
 
                 const analysis = await analyzePlantPhoto(
                   geminiApiKey,
@@ -713,9 +713,9 @@ export default {
             await telegramApi(botToken, "sendMessage", {
               chat_id: chatId,
               text:
-                "📸 Отправь новую фотографию этого растения с подписью:\\n\\n" +
+                "📸 Отправь новую фотографию этого растения с подписью:\n\n" +
                 `Фото растения ${selectedPlant.id} | Что изменилось или беспокоит` +
-                "\\n\\nФото сохранится в истории, а ИИ попробует оценить состояние с учётом предыдущих наблюдений.",
+                "\n\nФото сохранится в истории, а ИИ попробует оценить состояние с учётом предыдущих наблюдений.",
             });
             return Response.json({
               status: "ok",
@@ -728,9 +728,9 @@ export default {
             await telegramApi(botToken, "sendMessage", {
               chat_id: chatId,
               text:
-                "📝 Чтобы записать наблюдение для " + selectedPlant.name + ", отправь сообщение в формате:\\n\\n" +
+                "📝 Чтобы записать наблюдение для " + selectedPlant.name + ", отправь сообщение в формате:\n\n" +
                 `Наблюдение ${selectedPlant.id} | Текст наблюдения` +
-                "\\n\\nНапример: Наблюдение " + selectedPlant.id + " | Появились новые сухие кончики.",
+                "\n\nНапример: Наблюдение " + selectedPlant.id + " | Появились новые сухие кончики.",
             });
             return Response.json({
               status: "ok",
