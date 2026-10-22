@@ -95,34 +95,63 @@ recommendations — массив из 2–5 безопасных советов;
 follow_up_questions — массив уточняющих вопросов.
 `;
 
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            {
-              inline_data: {
-                mime_type: mimeType,
-                data: bytesToBase64(imageBytes),
-              },
-            },
-          ],
-        }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 1600,
-        },
-      }),
+  // Повторяем только временные сетевые ошибки и ответы перегруженного сервиса.
+  // Всего до 3 попыток; постоянные ошибки не маскируем долгим ожиданием.
+  const requestUrl =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
+  const requestOptions: RequestInit = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
     },
-  );
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: bytesToBase64(imageBytes),
+            },
+          },
+        ],
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        maxOutputTokens: 1600,
+      },
+    }),
+  };
+
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  let response: Response | null = null;
+  let lastNetworkError: unknown = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      response = await fetch(requestUrl, requestOptions);
+      lastNetworkError = null;
+
+      if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) {
+        break;
+      }
+    } catch (error) {
+      lastNetworkError = error;
+      if (attempt === 2) break;
+    }
+
+    // Паузы 0.8 и 1.6 секунды; не ждём после последней попытки.
+    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+  }
+
+  if (!response) {
+    throw new Error(
+      "Не удалось связаться с Gemini после 3 попыток" +
+        (lastNetworkError instanceof Error ? ": " + lastNetworkError.message : ""),
+    );
+  }
 
   if (!response.ok) {
     let providerMessage = "";
