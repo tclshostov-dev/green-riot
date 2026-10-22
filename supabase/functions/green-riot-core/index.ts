@@ -130,6 +130,9 @@ follow_up_questions — массив уточняющих вопросов.
   let lastNetworkError: unknown = null;
 
   for (let attempt = 0; attempt < 3; attempt++) {
+    // Сбрасываем предыдущий ответ: если новая попытка завершится сетевой ошибкой,
+    // нельзя случайно продолжить обработку старого HTTP-ответа.
+    response = null;
     try {
       response = await fetch(requestUrl, requestOptions);
       lastNetworkError = null;
