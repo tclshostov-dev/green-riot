@@ -465,44 +465,69 @@ export default {
         if (Array.isArray(message?.photo) && message.photo.length > 0) {
           const caption = String(message?.caption ?? "").trim();
           const photoMatch = caption.match(/^(?:фото\s+растения|растение)\s*#?\s*(\d+)(?:\s*[|—-]\s*(.*))?$/i);
+          const userNote = photoMatch ? ((photoMatch[2] ?? "").trim() || null) : (caption || null);
+          let photoPlant: { id: number; name: string; species: string | null } | null = null;
 
-          if (!photoMatch) {
-            await telegramApi(botToken, "sendMessage", {
-              chat_id: chatId,
-              text:
-                "📸 Фото получил, но пока не знаю, к какому растению его привязать.\n\n" +
-                "Отправь фото с подписью в формате:\n" +
-                "Фото растения 2 | На листьях появились пятна\n\n" +
-                "Число — ID твоего растения из карточки. Заметку после вертикальной черты можно изменить или убрать.",
-            });
-            return Response.json({ status: "ok", message: "Для фото требуется ID растения" });
-          }
+          if (photoMatch) {
+            const plantId = Number(photoMatch[1]);
+            const { data, error: photoPlantError } = await ctx.supabaseAdmin
+              .from("plants")
+              .select("id, name, species")
+              .eq("id", plantId)
+              .eq("user_id", user.id)
+              .eq("is_active", true)
+              .maybeSingle();
 
-          const plantId = Number(photoMatch[1]);
-          const userNote = (photoMatch[2] ?? "").trim() || null;
+            if (photoPlantError) {
+              return Response.json({
+                status: "error",
+                message: "Не удалось проверить растение для фотографии",
+                details: photoPlantError.message,
+              }, { status: 500 });
+            }
+            photoPlant = data;
+            if (!photoPlant) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "🌱 Не нашёл твоё активное растение с ID " + plantId + ". Проверь ID и отправь фото ещё раз.",
+              });
+              return Response.json({ status: "ok", message: "Растение для фото не найдено" });
+            }
+          } else {
+            const { data: activePlants, error: activePlantsError } = await ctx.supabaseAdmin
+              .from("plants")
+              .select("id, name, species")
+              .eq("user_id", user.id)
+              .eq("is_active", true)
+              .order("name", { ascending: true })
+              .limit(20);
 
-          const { data: photoPlant, error: photoPlantError } = await ctx.supabaseAdmin
-            .from("plants")
-            .select("id, name, species")
-            .eq("id", plantId)
-            .eq("user_id", user.id)
-            .eq("is_active", true)
-            .maybeSingle();
+            if (activePlantsError) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "Не удалось загрузить твои растения. Попробуй отправить фото ещё раз чуть позже.",
+              });
+              return Response.json({ status: "error", message: "Ошибка загрузки растений для фото" }, { status: 500 });
+            }
 
-          if (photoPlantError) {
-            return Response.json({
-              status: "error",
-              message: "Не удалось проверить растение для фотографии",
-              details: photoPlantError.message,
-            }, { status: 500 });
-          }
+            if (!activePlants || activePlants.length === 0) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "📸 Фото получил! Сначала добавь растение через «➕ Добавить растение», затем отправь фото ещё раз. Пока фото не сохранено в истории.",
+              });
+              return Response.json({ status: "ok", message: "Сначала требуется добавить растение" });
+            }
 
-          if (!photoPlant) {
-            await telegramApi(botToken, "sendMessage", {
-              chat_id: chatId,
-              text: "🌱 Не нашёл твоё активное растение с ID " + plantId + ". Проверь ID и отправь фото ещё раз.",
-            });
-            return Response.json({ status: "ok", message: "Растение для фото не найдено" });
+            if (activePlants.length > 1) {
+              const choices = activePlants.map((plant) => `• ${plant.name} (ID ${plant.id})`).join("\n");
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "📸 Фото получил. Чтобы не привязать его не к тому растению, ответь с подписью в формате «Фото растения ID | заметка».\n\nТвои растения:\n" + choices + "\n\nНапример: Фото растения " + activePlants[0].id + " | Желтеют нижние листья. Фото пока не сохранено — отправь его повторно с подписью после выбора.",
+              });
+              return Response.json({ status: "ok", message: "Требуется выбрать растение" });
+            }
+
+            photoPlant = activePlants[0];
           }
 
           try {
