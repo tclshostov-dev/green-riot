@@ -95,34 +95,66 @@ recommendations — массив из 2–5 безопасных советов;
 follow_up_questions — массив уточняющих вопросов.
 `;
 
-  const response = await fetch(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            {
-              inline_data: {
-                mime_type: mimeType,
-                data: bytesToBase64(imageBytes),
-              },
-            },
-          ],
-        }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 1600,
-        },
-      }),
+  // Повторяем только временные сетевые ошибки и ответы перегруженного сервиса.
+  // Всего до 3 попыток; постоянные ошибки не маскируем долгим ожиданием.
+  const requestUrl =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
+  const requestOptions: RequestInit = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
     },
-  );
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { text: prompt },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: bytesToBase64(imageBytes),
+            },
+          },
+        ],
+      }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+        maxOutputTokens: 1600,
+      },
+    }),
+  };
+
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  let response: Response | null = null;
+  let lastNetworkError: unknown = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Сбрасываем предыдущий ответ: если новая попытка завершится сетевой ошибкой,
+    // нельзя случайно продолжить обработку старого HTTP-ответа.
+    response = null;
+    try {
+      response = await fetch(requestUrl, requestOptions);
+      lastNetworkError = null;
+
+      if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) {
+        break;
+      }
+    } catch (error) {
+      lastNetworkError = error;
+      if (attempt === 2) break;
+    }
+
+    // Паузы 0.8 и 1.6 секунды; не ждём после последней попытки.
+    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+  }
+
+  if (!response) {
+    throw new Error(
+      "Не удалось связаться с Gemini после 3 попыток" +
+        (lastNetworkError instanceof Error ? ": " + lastNetworkError.message : ""),
+    );
+  }
 
   if (!response.ok) {
     let providerMessage = "";
@@ -188,6 +220,52 @@ follow_up_questions — массив уточняющих вопросов.
   };
 }
 
+async function answerPlantQuestion(apiKey: string, question: string, plantContext: string) {
+  const prompt = `
+Ты — русскоязычный помощник по уходу за комнатными растениями в Telegram-боте «Зелёный бунт».
+Отвечай простым языком и по существу. Не ставь точный диагноз без данных, не выдумывай факты и не советуй опасные химикаты или неизвестные дозировки.
+Если вопрос зависит от конкретного растения, а контекста не хватает, задай один короткий уточняющий вопрос.
+Отделяй общие рекомендации от предположений. Не утверждай, что видел фото, если его нет.
+
+Контекст растений пользователя:
+${plantContext || "Список растений недоступен."}
+
+Вопрос пользователя:
+${question}
+`;
+  const requestUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
+  const requestOptions: RequestInit = {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 900 } }),
+  };
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  let response: Response | null = null;
+  let lastNetworkError: unknown = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = null;
+    try {
+      response = await fetch(requestUrl, requestOptions);
+      lastNetworkError = null;
+      if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) break;
+    } catch (error) {
+      lastNetworkError = error;
+      if (attempt === 2) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+  }
+
+  if (!response) {
+    throw new Error("Не удалось связаться с Gemini после 3 попыток" +
+      (lastNetworkError instanceof Error ? ": " + lastNetworkError.message : ""));
+  }
+  if (!response.ok) throw new Error("Gemini API вернул HTTP " + response.status);
+  const result = await response.json();
+  const answer = result?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("").trim();
+  if (!answer) throw new Error("ИИ не вернул текстовый ответ");
+  return answer.slice(0, 3800);
+}
 function parseAddPlantCommand(text: string) {
   const withoutCommand = text
     .replace(/^\/addplant(?:@\w+)?/i, "")
@@ -387,44 +465,69 @@ export default {
         if (Array.isArray(message?.photo) && message.photo.length > 0) {
           const caption = String(message?.caption ?? "").trim();
           const photoMatch = caption.match(/^(?:фото\s+растения|растение)\s*#?\s*(\d+)(?:\s*[|—-]\s*(.*))?$/i);
+          const userNote = photoMatch ? ((photoMatch[2] ?? "").trim() || null) : (caption || null);
+          let photoPlant: { id: number; name: string; species: string | null } | null = null;
 
-          if (!photoMatch) {
-            await telegramApi(botToken, "sendMessage", {
-              chat_id: chatId,
-              text:
-                "📸 Фото получил, но пока не знаю, к какому растению его привязать.\n\n" +
-                "Отправь фото с подписью в формате:\n" +
-                "Фото растения 2 | На листьях появились пятна\n\n" +
-                "Число — ID твоего растения из карточки. Заметку после вертикальной черты можно изменить или убрать.",
-            });
-            return Response.json({ status: "ok", message: "Для фото требуется ID растения" });
-          }
+          if (photoMatch) {
+            const plantId = Number(photoMatch[1]);
+            const { data, error: photoPlantError } = await ctx.supabaseAdmin
+              .from("plants")
+              .select("id, name, species")
+              .eq("id", plantId)
+              .eq("user_id", user.id)
+              .eq("is_active", true)
+              .maybeSingle();
 
-          const plantId = Number(photoMatch[1]);
-          const userNote = (photoMatch[2] ?? "").trim() || null;
+            if (photoPlantError) {
+              return Response.json({
+                status: "error",
+                message: "Не удалось проверить растение для фотографии",
+                details: photoPlantError.message,
+              }, { status: 500 });
+            }
+            photoPlant = data;
+            if (!photoPlant) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "🌱 Не нашёл твоё активное растение с ID " + plantId + ". Проверь ID и отправь фото ещё раз.",
+              });
+              return Response.json({ status: "ok", message: "Растение для фото не найдено" });
+            }
+          } else {
+            const { data: activePlants, error: activePlantsError } = await ctx.supabaseAdmin
+              .from("plants")
+              .select("id, name, species")
+              .eq("user_id", user.id)
+              .eq("is_active", true)
+              .order("name", { ascending: true })
+              .limit(20);
 
-          const { data: photoPlant, error: photoPlantError } = await ctx.supabaseAdmin
-            .from("plants")
-            .select("id, name, species")
-            .eq("id", plantId)
-            .eq("user_id", user.id)
-            .eq("is_active", true)
-            .maybeSingle();
+            if (activePlantsError) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "Не удалось загрузить твои растения. Попробуй отправить фото ещё раз чуть позже.",
+              });
+              return Response.json({ status: "error", message: "Ошибка загрузки растений для фото" }, { status: 500 });
+            }
 
-          if (photoPlantError) {
-            return Response.json({
-              status: "error",
-              message: "Не удалось проверить растение для фотографии",
-              details: photoPlantError.message,
-            }, { status: 500 });
-          }
+            if (!activePlants || activePlants.length === 0) {
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "📸 Фото получил! Сначала добавь растение через «➕ Добавить растение», затем отправь фото ещё раз. Пока фото не сохранено в истории.",
+              });
+              return Response.json({ status: "ok", message: "Сначала требуется добавить растение" });
+            }
 
-          if (!photoPlant) {
-            await telegramApi(botToken, "sendMessage", {
-              chat_id: chatId,
-              text: "🌱 Не нашёл твоё активное растение с ID " + plantId + ". Проверь ID и отправь фото ещё раз.",
-            });
-            return Response.json({ status: "ok", message: "Растение для фото не найдено" });
+            if (activePlants.length > 1) {
+              const choices = activePlants.map((plant) => `• ${plant.name} (ID ${plant.id})`).join("\n");
+              await telegramApi(botToken, "sendMessage", {
+                chat_id: chatId,
+                text: "📸 Фото получил. Чтобы не привязать его не к тому растению, ответь с подписью в формате «Фото растения ID | заметка».\n\nТвои растения:\n" + choices + "\n\nНапример: Фото растения " + activePlants[0].id + " | Желтеют нижние листья. Фото пока не сохранено — отправь его повторно с подписью после выбора.",
+              });
+              return Response.json({ status: "ok", message: "Требуется выбрать растение" });
+            }
+
+            photoPlant = activePlants[0];
           }
 
           try {
@@ -1608,23 +1711,31 @@ export default {
           });
         }
 
-        // ПРОЧИЕ СООБЩЕНИЯ
-        const replyText =
-          "🌱 Я на связи! Выбери действие в русском меню под полем ввода.\n\n" +
-          "Чтобы добавить растение, нажми «➕ Добавить растение». " +
-          "Чтобы открыть сад — «🌿 Мои растения».";
-
-        await telegramApi(
-          botToken,
-          "sendMessage",
-          { chat_id: chatId, text: replyText },
-        );
-
-        return Response.json({
-          status: "ok",
-          message: "Сообщение обработано",
-          user_id: user.id,
-        });
+        // СВОБОДНЫЙ ТЕКСТ: отвечаем на обычные вопросы о растениях
+        if (text.trim() && !text.trim().startsWith("/")) {
+          const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+          if (!geminiApiKey) {
+            await telegramApi(botToken, "sendMessage", { chat_id: chatId, text: "Сейчас ИИ-помощник временно недоступен. Попробуй немного позже." });
+            return Response.json({ status: "error", message: "GEMINI_API_KEY не настроен" }, { status: 500 });
+          }
+          const { data: plants, error: plantsError } = await ctx.supabaseAdmin.from("plants").select("name, species, location, notes").eq("user_id", user.id).eq("is_active", true).limit(30);
+          if (plantsError) {
+            await telegramApi(botToken, "sendMessage", { chat_id: chatId, text: "Не удалось загрузить список твоих растений. Попробуй ещё раз." });
+            return Response.json({ status: "error", message: "Не удалось загрузить растения" }, { status: 500 });
+          }
+          const plantContext = (plants ?? []).map((plant, index) => `${index + 1}. ${plant.name}; вид: ${plant.species || "не указан"}; место: ${plant.location || "не указано"}; заметка: ${plant.notes || "нет"}`).join("\n");
+          try {
+            const answer = await answerPlantQuestion(geminiApiKey, text.trim(), plantContext);
+            await telegramApi(botToken, "sendMessage", { chat_id: chatId, text: answer });
+            return Response.json({ status: "ok", message: "Свободный текст обработан", user_id: user.id });
+          } catch (error) {
+            await telegramApi(botToken, "sendMessage", { chat_id: chatId, text: "Не получилось подготовить ответ: ИИ сейчас временно недоступен. Попробуй ещё раз чуть позже." });
+            return Response.json({ status: "error", message: "Ошибка ответа на свободный текст", details: error instanceof Error ? error.message : String(error) }, { status: 502 });
+          }
+        }
+        const replyText = "🌱 Я на связи! Можешь задать обычный вопрос о растениях, отправить фото или выбрать действие в меню.";
+        await telegramApi(botToken, "sendMessage", { chat_id: chatId, text: replyText });
+        return Response.json({ status: "ok", message: "Сообщение обработано", user_id: user.id });
       } catch (error) {
         return Response.json(
           {
