@@ -233,11 +233,33 @@ ${plantContext || "Список растений недоступен."}
 Вопрос пользователя:
 ${question}
 `;
-  const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent", {
+  const requestUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent";
+  const requestOptions: RequestInit = {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.3, maxOutputTokens: 900 } }),
-  });
+  };
+  const retryableStatuses = new Set([429, 500, 502, 503, 504]);
+  let response: Response | null = null;
+  let lastNetworkError: unknown = null;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = null;
+    try {
+      response = await fetch(requestUrl, requestOptions);
+      lastNetworkError = null;
+      if (response.ok || !retryableStatuses.has(response.status) || attempt === 2) break;
+    } catch (error) {
+      lastNetworkError = error;
+      if (attempt === 2) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+  }
+
+  if (!response) {
+    throw new Error("Не удалось связаться с Gemini после 3 попыток" +
+      (lastNetworkError instanceof Error ? ": " + lastNetworkError.message : ""));
+  }
   if (!response.ok) throw new Error("Gemini API вернул HTTP " + response.status);
   const result = await response.json();
   const answer = result?.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("").trim();
